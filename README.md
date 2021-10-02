@@ -32,6 +32,28 @@ func main() {
 }
 ```
 
+## Return feed struct
+
+```go
+type RSS struct {
+	XMLName xml.Name `xml:"rss"`
+	Text    string   `xml:",chardata"`
+	Version string   `xml:"version,attr"`
+	Channel struct {
+		Text        string `xml:",chardata"`
+		Title       string `xml:"title"`
+		Link        string `xml:"link"`
+		Description string `xml:"description"`
+		Item        []struct {
+			Text        string `xml:",chardata"`
+			Title       string `xml:"title"`
+			Link        string `xml:"link"`
+			Description string `xml:"description"`
+		} `xml:"item"`
+	} `xml:"channel"`
+}
+```
+
 ## Authors
 
 * **Iordanis Paschalidis** -[junkd0g](https://github.com/junkd0g)
