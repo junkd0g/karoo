@@ -1,4 +1,4 @@
-package karoo
+package rss
 
 import (
 	"encoding/xml"
