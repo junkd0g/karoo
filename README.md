@@ -1,0 +1,2 @@
+# karoo
+Golang RSS client
