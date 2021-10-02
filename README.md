@@ -11,7 +11,25 @@ go get -u github.com/junkd0g/karoo
 ```go
 package main
 
+import (
+	"fmt"
 
+	rss "github.com/junkd0g/karoo"
+)
+
+func main() {
+	client, clientError := rss.NewClient()
+	if clientError != nil {
+		panic(clientError.Error())
+	}
+
+	feed, getFeedError := client.GetFeed("https://news.google.com/rss")
+	if getFeedError != nil {
+		panic(getFeedError)
+	}
+	fmt.Println(feed)
+
+}
 ```
 
 ## Authors
