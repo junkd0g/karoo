@@ -1,3 +1,6 @@
+[![Go Report Card](https://goreportcard.com/badge/github.com/junkd0g/karoo)](https://goreportcard.com/report/github.com/junkd0g/karoo)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![GoDoc](https://pkg.go.dev/badge/github.com/junkd0g/karoo.svg)](https://pkg.go.dev/github.com/junkd0g/karoo)
 # karoo
 
 Package junkd0g/karoo is a simple rss feed client
