@@ -1,22 +1,27 @@
+/*
+Package rss provides a simple client for fetching and parsing RSS feeds using Go's standard libraries.
+It supports configurable HTTP client options such as custom timeouts or custom HTTP clients.
+The package includes a basic RSS struct that represents the typical XML structure of an RSS feed.
+*/
 package rss
 
 import (
 	"encoding/xml"
-	"io/ioutil"
+	"errors"
+	"io"
 	"net/http"
+	"time"
 )
 
+// RSS represents the structure of an RSS feed.
 type RSS struct {
 	XMLName xml.Name `xml:"rss"`
-	Text    string   `xml:",chardata"`
 	Version string   `xml:"version,attr"`
 	Channel struct {
-		Text        string `xml:",chardata"`
 		Title       string `xml:"title"`
 		Link        string `xml:"link"`
 		Description string `xml:"description"`
-		Item        []struct {
-			Text        string `xml:",chardata"`
+		Items       []struct {
 			Title       string `xml:"title"`
 			Link        string `xml:"link"`
 			Description string `xml:"description"`
@@ -24,52 +29,69 @@ type RSS struct {
 	} `xml:"channel"`
 }
 
-type Client struct{}
-
-type ClientInterface interface {
-	request(url string) ([]byte, error)
-	GetFeed(url string) (RSS, error)
+// Client is used for fetching and parsing RSS feeds.
+type Client struct {
+	httpClient *http.Client
 }
 
-func NewClient() (Client, error) {
-	return Client{}, nil
+// ClientOption defines a function type for configuring the RSS Client.
+type ClientOption func(*Client)
+
+// NewClient creates a new RSS Client with optional configuration options.
+// By default, it uses an HTTP client with a 10-second timeout.
+func NewClient(opts ...ClientOption) *Client {
+	client := &Client{
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
+
+	for _, opt := range opts {
+		opt(client)
+	}
+
+	return client
 }
 
-func (c Client) request(url string) ([]byte, error) {
-	client := &http.Client{}
-	req, reqError := http.NewRequest(http.MethodGet, url, nil)
-
-	if reqError != nil {
-		return nil, reqError
+// WithHTTPClient sets a custom HTTP client for the RSS Client.
+func WithHTTPClient(httpClient *http.Client) ClientOption {
+	return func(c *Client) {
+		c.httpClient = httpClient
 	}
-
-	res, resError := client.Do(req)
-	if resError != nil {
-		return nil, resError
-
-	}
-
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	return body, nil
 }
 
-// GetFeed does a GET request to the url passed
-// and return an RSS strut of the response
-func (c Client) GetFeed(url string) (RSS, error) {
+// WithTimeout sets a custom timeout for HTTP requests.
+func WithTimeout(timeout time.Duration) ClientOption {
+	return func(c *Client) {
+		c.httpClient.Timeout = timeout
+	}
+}
 
-	body, err := c.request(url)
+// GetFeed fetches the RSS feed from the specified URL and parses it.
+// It returns the RSS struct or an error if the request or parsing fails.
+func (c *Client) GetFeed(url string) (RSS, error) {
+	// Perform an HTTP GET request to retrieve the RSS feed.
+	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return RSS{}, err
 	}
-	var feed RSS
+	defer resp.Body.Close()
 
-	unmarshallError := xml.Unmarshal(body, &feed)
-	if unmarshallError != nil {
-		return RSS{}, unmarshallError
+	// Ensure the HTTP response status is OK.
+	if resp.StatusCode != http.StatusOK {
+		return RSS{}, errors.New("failed to fetch RSS feed: " + resp.Status)
+	}
+
+	// Read the response body.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return RSS{}, err
+	}
+
+	// Unmarshal the XML response into the RSS struct.
+	var feed RSS
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return RSS{}, err
 	}
 
 	return feed, nil
