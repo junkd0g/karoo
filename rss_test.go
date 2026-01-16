@@ -246,3 +246,175 @@ func TestGetFeedMissingOptionalFields(t *testing.T) {
 	assert.Equal(t, "http://example.com/item2", feed.Channel.Items[1].Link)
 	assert.Equal(t, "Item with different fields", feed.Channel.Items[1].Description)
 }
+
+// TestGetFeedExtendedFields verifies that GetFeed correctly parses extended RSS fields.
+func TestGetFeedExtendedFields(t *testing.T) {
+	extendedXML := `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Extended Feed</title>
+    <link>http://example.com</link>
+    <description>Feed with extended fields</description>
+    <language>en-us</language>
+    <image>
+      <url>http://example.com/logo.png</url>
+      <title>Feed Logo</title>
+      <link>http://example.com</link>
+    </image>
+    <item>
+      <title>Item with all fields</title>
+      <link>http://example.com/item1</link>
+      <description>Full description</description>
+      <pubDate>Mon, 15 Jan 2024 10:30:00 GMT</pubDate>
+      <guid>unique-id-123</guid>
+      <author>john@example.com</author>
+      <category>Technology</category>
+      <enclosure url="http://example.com/image.jpg" type="image/jpeg" length="12345"/>
+    </item>
+  </channel>
+</rss>`
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(extendedXML))
+	}))
+	defer ts.Close()
+
+	client := rss.NewClient()
+	feed, err := client.GetFeed(ts.URL)
+	assert.NoError(t, err)
+
+	// Channel extended fields
+	assert.Equal(t, "en-us", feed.Channel.Language)
+	assert.NotNil(t, feed.Channel.Image)
+	assert.Equal(t, "http://example.com/logo.png", feed.Channel.Image.URL)
+	assert.Equal(t, "Feed Logo", feed.Channel.Image.Title)
+
+	// Item extended fields
+	assert.Len(t, feed.Channel.Items, 1)
+	item := feed.Channel.Items[0]
+	assert.Equal(t, "Mon, 15 Jan 2024 10:30:00 GMT", item.PubDate)
+	assert.Equal(t, "unique-id-123", item.GUID)
+	assert.Equal(t, "john@example.com", item.Author)
+	assert.Equal(t, "Technology", item.Category)
+	assert.NotNil(t, item.Enclosure)
+	assert.Equal(t, "http://example.com/image.jpg", item.Enclosure.URL)
+	assert.Equal(t, "image/jpeg", item.Enclosure.Type)
+	assert.Equal(t, "12345", item.Enclosure.Length)
+}
+
+// TestParsePubDate verifies that ParsePubDate correctly parses various date formats.
+func TestParsePubDate(t *testing.T) {
+	testCases := []struct {
+		name     string
+		pubDate  string
+		expected time.Time
+		useNow   bool
+	}{
+		{
+			name:     "RFC1123",
+			pubDate:  "Mon, 15 Jan 2024 10:30:00 GMT",
+			expected: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
+		},
+		{
+			name:     "RFC1123Z",
+			pubDate:  "Mon, 15 Jan 2024 10:30:00 +0000",
+			expected: time.Date(2024, 1, 15, 10, 30, 0, 0, time.FixedZone("", 0)),
+		},
+		{
+			name:     "RFC822",
+			pubDate:  "15 Jan 24 10:30 GMT",
+			expected: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
+		},
+		{
+			name:     "ISO8601 with Z",
+			pubDate:  "2024-01-15T10:30:00Z",
+			expected: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
+		},
+		{
+			name:     "ISO8601 with offset",
+			pubDate:  "2024-01-15T10:30:00-05:00",
+			expected: time.Date(2024, 1, 15, 10, 30, 0, 0, time.FixedZone("", -5*3600)),
+		},
+		{
+			name:    "empty string",
+			pubDate: "",
+			useNow:  true,
+		},
+		{
+			name:    "invalid format",
+			pubDate: "not a date",
+			useNow:  true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := rss.Item{PubDate: tc.pubDate}
+			result := item.ParsePubDate()
+
+			if tc.useNow {
+				// Should be close to current time
+				assert.WithinDuration(t, time.Now(), result, 2*time.Second)
+			} else {
+				assert.Equal(t, tc.expected.Year(), result.Year())
+				assert.Equal(t, tc.expected.Month(), result.Month())
+				assert.Equal(t, tc.expected.Day(), result.Day())
+				assert.Equal(t, tc.expected.Hour(), result.Hour())
+				assert.Equal(t, tc.expected.Minute(), result.Minute())
+			}
+		})
+	}
+}
+
+// TestGetEnclosureURL verifies that GetEnclosureURL returns the correct URL.
+func TestGetEnclosureURL(t *testing.T) {
+	t.Run("with enclosure", func(t *testing.T) {
+		item := rss.Item{
+			Enclosure: &rss.Enclosure{
+				URL:  "http://example.com/media.mp3",
+				Type: "audio/mpeg",
+			},
+		}
+		assert.Equal(t, "http://example.com/media.mp3", item.GetEnclosureURL())
+	})
+
+	t.Run("without enclosure", func(t *testing.T) {
+		item := rss.Item{}
+		assert.Equal(t, "", item.GetEnclosureURL())
+	})
+}
+
+// TestIsImageEnclosure verifies that IsImageEnclosure correctly identifies image types.
+func TestIsImageEnclosure(t *testing.T) {
+	testCases := []struct {
+		name     string
+		mimeType string
+		expected bool
+	}{
+		{"jpeg", "image/jpeg", true},
+		{"png", "image/png", true},
+		{"gif", "image/gif", true},
+		{"webp", "image/webp", true},
+		{"mp3", "audio/mpeg", false},
+		{"mp4", "video/mp4", false},
+		{"pdf", "application/pdf", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := rss.Item{
+				Enclosure: &rss.Enclosure{
+					URL:  "http://example.com/file",
+					Type: tc.mimeType,
+				},
+			}
+			assert.Equal(t, tc.expected, item.IsImageEnclosure())
+		})
+	}
+
+	t.Run("nil enclosure", func(t *testing.T) {
+		item := rss.Item{}
+		assert.False(t, item.IsImageEnclosure())
+	})
+}

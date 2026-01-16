@@ -17,16 +17,92 @@ import (
 type RSS struct {
 	XMLName xml.Name `xml:"rss"`
 	Version string   `xml:"version,attr"`
-	Channel struct {
-		Title       string `xml:"title"`
-		Link        string `xml:"link"`
-		Description string `xml:"description"`
-		Items       []struct {
-			Title       string `xml:"title"`
-			Link        string `xml:"link"`
-			Description string `xml:"description"`
-		} `xml:"item"`
-	} `xml:"channel"`
+	Channel Channel  `xml:"channel"`
+}
+
+// Channel represents an RSS channel.
+type Channel struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	Language    string `xml:"language"`
+	Image       *Image `xml:"image"`
+	Items       []Item `xml:"item"`
+}
+
+// Image represents a channel image.
+type Image struct {
+	URL   string `xml:"url"`
+	Title string `xml:"title"`
+	Link  string `xml:"link"`
+}
+
+// Item represents an RSS item.
+type Item struct {
+	Title       string     `xml:"title"`
+	Link        string     `xml:"link"`
+	Description string     `xml:"description"`
+	PubDate     string     `xml:"pubDate"`
+	GUID        string     `xml:"guid"`
+	Author      string     `xml:"author"`
+	Category    string     `xml:"category"`
+	Enclosure   *Enclosure `xml:"enclosure"`
+}
+
+// Enclosure represents a media enclosure in an RSS item.
+type Enclosure struct {
+	URL    string `xml:"url,attr"`
+	Type   string `xml:"type,attr"`
+	Length string `xml:"length,attr"`
+}
+
+// ParsePubDate attempts to parse the PubDate field into a time.Time.
+// Returns the parsed time or the current time if parsing fails.
+func (item *Item) ParsePubDate() time.Time {
+	if item.PubDate == "" {
+		return time.Now()
+	}
+
+	formats := []string{
+		time.RFC1123,
+		time.RFC1123Z,
+		time.RFC822,
+		time.RFC822Z,
+		"Mon, 2 Jan 2006 15:04:05 -0700",
+		"Mon, 2 Jan 2006 15:04:05 MST",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05-07:00",
+		"2006-01-02 15:04:05",
+		"02 Jan 2006 15:04:05 -0700",
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, item.PubDate); err == nil {
+			return t
+		}
+	}
+
+	return time.Now()
+}
+
+// GetEnclosureURL returns the enclosure URL if present, empty string otherwise.
+func (item *Item) GetEnclosureURL() string {
+	if item.Enclosure != nil {
+		return item.Enclosure.URL
+	}
+	return ""
+}
+
+// IsImageEnclosure returns true if the enclosure is an image type.
+func (item *Item) IsImageEnclosure() bool {
+	if item.Enclosure == nil {
+		return false
+	}
+	switch item.Enclosure.Type {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	}
+	return false
 }
 
 // Client is used for fetching and parsing RSS feeds.
