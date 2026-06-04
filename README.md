@@ -78,6 +78,12 @@ httpClient := &http.Client{
 client := rss.NewClient(rss.WithHTTPClient(httpClient))
 ```
 
+### Custom User-Agent
+
+```go
+client := rss.NewClient(rss.WithUserAgent("my-app/2.0"))
+```
+
 ### Multiple Configuration Options
 
 `WithTimeout` is always applied after all other options, so it works correctly regardless of ordering with `WithHTTPClient`:
@@ -198,6 +204,12 @@ Sets a custom timeout for HTTP requests. Applied after all other options, so it 
 func WithHTTPClient(httpClient *http.Client) ClientOption
 ```
 Sets a custom HTTP client for RSS requests.
+
+#### WithUserAgent
+```go
+func WithUserAgent(userAgent string) ClientOption
+```
+Sets a custom User-Agent header for HTTP requests. Defaults to `karoo/1.0`.
 
 ### Methods
 

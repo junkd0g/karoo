@@ -183,7 +183,9 @@ func (c *Client) GetFeed(ctx context.Context, url string) (RSS, error) {
 	if err != nil {
 		return RSS{}, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return RSS{}, fmt.Errorf("failed to fetch RSS feed: %s", resp.Status)
