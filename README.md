@@ -8,12 +8,15 @@ A lightweight, efficient RSS feed client for Go that provides a simple interface
 
 ## Features
 
-- ✅ Simple, clean API
-- ✅ Configurable HTTP client (timeouts, custom clients)
-- ✅ Comprehensive error handling
-- ✅ Zero external dependencies (uses only Go standard library)
-- ✅ Well-tested with extensive test coverage
-- ✅ Thread-safe operations
+- Simple, clean API
+- Configurable HTTP client (timeouts, custom clients)
+- Context support for cancellation and deadline control
+- Response size limit to prevent OOM from oversized feeds
+- Content-Type validation and Atom feed detection
+- Comprehensive error handling
+- Zero external dependencies (uses only Go standard library)
+- Well-tested with 100% statement coverage
+- Thread-safe operations
 
 ## Installation
 
@@ -27,6 +30,7 @@ go get -u github.com/junkd0g/karoo
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -35,16 +39,16 @@ import (
 
 func main() {
 	client := rss.NewClient()
-	
-	feed, err := client.GetFeed("https://news.google.com/rss")
+
+	feed, err := client.GetFeed(context.Background(), "https://news.google.com/rss")
 	if err != nil {
 		log.Fatal(err)
 	}
-	
+
 	fmt.Printf("Feed Title: %s\n", feed.Channel.Title)
 	fmt.Printf("Feed Description: %s\n", feed.Channel.Description)
 	fmt.Printf("Number of items: %d\n", len(feed.Channel.Items))
-	
+
 	for _, item := range feed.Channel.Items {
 		fmt.Printf("- %s: %s\n", item.Title, item.Link)
 	}
@@ -76,22 +80,30 @@ client := rss.NewClient(rss.WithHTTPClient(httpClient))
 
 ### Multiple Configuration Options
 
+`WithTimeout` is always applied after all other options, so it works correctly regardless of ordering with `WithHTTPClient`:
+
 ```go
 client := rss.NewClient(
-	rss.WithTimeout(20 * time.Second),
 	rss.WithHTTPClient(customHTTPClient),
+	rss.WithTimeout(20 * time.Second),
 )
 ```
 
 ## Error Handling
 
 ```go
-feed, err := client.GetFeed("https://example.com/feed.xml")
+feed, err := client.GetFeed(context.Background(), "https://example.com/feed.xml")
 if err != nil {
 	switch {
 	case strings.Contains(err.Error(), "failed to fetch RSS feed"):
 		// Handle HTTP errors (404, 500, etc.)
 		log.Printf("HTTP error: %v", err)
+	case strings.Contains(err.Error(), "unexpected content type"):
+		// Handle non-XML responses (e.g., HTML login pages)
+		log.Printf("Content type error: %v", err)
+	case strings.Contains(err.Error(), "Atom feeds are not supported"):
+		// Handle Atom feeds
+		log.Printf("Unsupported format: %v", err)
 	case strings.Contains(err.Error(), "Client.Timeout"):
 		// Handle timeout errors
 		log.Printf("Request timeout: %v", err)
@@ -112,16 +124,51 @@ if err != nil {
 type RSS struct {
 	XMLName xml.Name `xml:"rss"`
 	Version string   `xml:"version,attr"`
-	Channel struct {
-		Title       string `xml:"title"`
-		Link        string `xml:"link"`
-		Description string `xml:"description"`
-		Items       []struct {
-			Title       string `xml:"title"`
-			Link        string `xml:"link"`
-			Description string `xml:"description"`
-		} `xml:"item"`
-	} `xml:"channel"`
+	Channel Channel  `xml:"channel"`
+}
+```
+
+#### Channel
+```go
+type Channel struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	Language    string `xml:"language"`
+	Image       *Image `xml:"image"`
+	Items       []Item `xml:"item"`
+}
+```
+
+#### Image
+```go
+type Image struct {
+	URL   string `xml:"url"`
+	Title string `xml:"title"`
+	Link  string `xml:"link"`
+}
+```
+
+#### Item
+```go
+type Item struct {
+	Title       string     `xml:"title"`
+	Link        string     `xml:"link"`
+	Description string     `xml:"description"`
+	PubDate     string     `xml:"pubDate"`
+	GUID        string     `xml:"guid"`
+	Author      string     `xml:"author"`
+	Category    []string   `xml:"category"`
+	Enclosure   *Enclosure `xml:"enclosure"`
+}
+```
+
+#### Enclosure
+```go
+type Enclosure struct {
+	URL    string `xml:"url,attr"`
+	Type   string `xml:"type,attr"`
+	Length int64  `xml:"length,attr"`
 }
 ```
 
@@ -144,7 +191,7 @@ Creates a new RSS client with optional configuration. Default timeout is 10 seco
 ```go
 func WithTimeout(timeout time.Duration) ClientOption
 ```
-Sets a custom timeout for HTTP requests.
+Sets a custom timeout for HTTP requests. Applied after all other options, so it works correctly regardless of ordering with `WithHTTPClient`.
 
 #### WithHTTPClient
 ```go
@@ -156,9 +203,27 @@ Sets a custom HTTP client for RSS requests.
 
 #### GetFeed
 ```go
-func (c *Client) GetFeed(url string) (RSS, error)
+func (c *Client) GetFeed(ctx context.Context, url string) (RSS, error)
 ```
-Fetches and parses an RSS feed from the specified URL. Returns the parsed RSS struct or an error.
+Fetches and parses an RSS feed from the specified URL. Accepts a context for cancellation and deadline control. Returns the parsed RSS struct or an error. Sets a `User-Agent` header on requests. Validates the response Content-Type is XML-based, limits response body size to 10MB, and detects Atom feeds (returning an error since only RSS is supported).
+
+#### ParsePubDate
+```go
+func (item *Item) ParsePubDate() (time.Time, error)
+```
+Attempts to parse the PubDate field into a `time.Time`. Returns the parsed time and nil on success, or a zero `time.Time` and an error if the date is empty or in an unrecognized format. Supports RFC1123, RFC1123Z, RFC822, RFC822Z, ISO 8601, and other common date formats.
+
+#### GetEnclosureURL
+```go
+func (item *Item) GetEnclosureURL() string
+```
+Returns the enclosure URL if present, empty string otherwise.
+
+#### IsImageEnclosure
+```go
+func (item *Item) IsImageEnclosure() bool
+```
+Returns true if the enclosure MIME type is an image (jpeg, png, gif, or webp).
 
 ## Examples
 
@@ -168,6 +233,7 @@ Fetches and parses an RSS feed from the specified URL. Returns the parsed RSS st
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -176,20 +242,20 @@ import (
 
 func main() {
 	client := rss.NewClient()
-	
+
 	feeds := []string{
 		"https://rss.cnn.com/rss/edition.rss",
 		"https://feeds.bbci.co.uk/news/rss.xml",
 		"https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
 	}
-	
+
 	for _, feedURL := range feeds {
-		feed, err := client.GetFeed(feedURL)
+		feed, err := client.GetFeed(context.Background(), feedURL)
 		if err != nil {
 			log.Printf("Error fetching %s: %v", feedURL, err)
 			continue
 		}
-		
+
 		fmt.Printf("\n=== %s ===\n", feed.Channel.Title)
 		for i, item := range feed.Channel.Items {
 			if i >= 3 { // Show only first 3 items
@@ -207,6 +273,7 @@ func main() {
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -217,34 +284,35 @@ import (
 
 func main() {
 	client := rss.NewClient(rss.WithTimeout(5 * time.Second))
-	
+
 	feeds := []string{
 		"https://rss.cnn.com/rss/edition.rss",
 		"https://feeds.bbci.co.uk/news/rss.xml",
 		"https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
 	}
-	
+
 	var wg sync.WaitGroup
 	results := make(chan string, len(feeds))
-	
+
+	ctx := context.Background()
 	for _, feedURL := range feeds {
 		wg.Add(1)
 		go func(url string) {
 			defer wg.Done()
-			
-			feed, err := client.GetFeed(url)
+
+			feed, err := client.GetFeed(ctx, url)
 			if err != nil {
 				results <- fmt.Sprintf("Error fetching %s: %v", url, err)
 				return
 			}
-			
+
 			results <- fmt.Sprintf("%s: %d items", feed.Channel.Title, len(feed.Channel.Items))
 		}(feedURL)
 	}
-	
+
 	wg.Wait()
 	close(results)
-	
+
 	for result := range results {
 		fmt.Println(result)
 	}

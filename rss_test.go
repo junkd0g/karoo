@@ -1,7 +1,9 @@
 package rss_test
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,7 +41,7 @@ func TestGetFeedSuccess(t *testing.T) {
 	defer ts.Close()
 
 	client := rss.NewClient()
-	feed, err := client.GetFeed(ts.URL)
+	feed, err := client.GetFeed(context.Background(), ts.URL)
 	assert.NoError(t, err)
 	assert.Equal(t, "2.0", feed.Version)
 	assert.Equal(t, "Test Feed", feed.Channel.Title)
@@ -59,7 +61,7 @@ func TestGetFeedNonOK(t *testing.T) {
 	defer ts.Close()
 
 	client := rss.NewClient()
-	_, err := client.GetFeed(ts.URL)
+	_, err := client.GetFeed(context.Background(), ts.URL)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to fetch RSS feed")
 }
@@ -68,13 +70,14 @@ func TestGetFeedNonOK(t *testing.T) {
 func TestGetFeedInvalidXML(t *testing.T) {
 	invalidXML := `this is not xml`
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(invalidXML))
 	}))
 	defer ts.Close()
 
 	client := rss.NewClient()
-	_, err := client.GetFeed(ts.URL)
+	_, err := client.GetFeed(context.Background(), ts.URL)
 	assert.Error(t, err)
 }
 
@@ -107,7 +110,7 @@ func TestGetFeedReadError(t *testing.T) {
 		Timeout:   5 * time.Second,
 	}
 	client := rss.NewClient(rss.WithHTTPClient(customHTTPClient))
-	_, err := client.GetFeed("http://example.com")
+	_, err := client.GetFeed(context.Background(), "http://example.com")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "read error")
 }
@@ -124,7 +127,7 @@ func TestGetFeedTimeout(t *testing.T) {
 
 	// Set a client timeout shorter than the server's delay.
 	client := rss.NewClient(rss.WithTimeout(50 * time.Millisecond))
-	_, err := client.GetFeed(ts.URL)
+	_, err := client.GetFeed(context.Background(), ts.URL)
 	assert.Error(t, err)
 	// The error message may vary, but should indicate a timeout.
 	assert.Contains(t, err.Error(), "Client.Timeout")
@@ -132,8 +135,8 @@ func TestGetFeedTimeout(t *testing.T) {
 
 // TestGetFeedNetworkError verifies that GetFeed returns an error when the host is unreachable.
 func TestGetFeedNetworkError(t *testing.T) {
-	client := rss.NewClient()
-	_, err := client.GetFeed("http://192.0.2.1:12345/nonexistent") // RFC 3330 test address
+	client := rss.NewClient(rss.WithTimeout(100 * time.Millisecond))
+	_, err := client.GetFeed(context.Background(), "http://192.0.2.1:12345/nonexistent") // RFC 5737 TEST-NET address
 	assert.Error(t, err)
 }
 
@@ -158,7 +161,7 @@ func TestGetFeedDifferentStatusCodes(t *testing.T) {
 			defer ts.Close()
 
 			client := rss.NewClient()
-			_, err := client.GetFeed(ts.URL)
+			_, err := client.GetFeed(context.Background(), ts.URL)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "failed to fetch RSS feed")
 		})
@@ -168,13 +171,14 @@ func TestGetFeedDifferentStatusCodes(t *testing.T) {
 // TestGetFeedEmptyResponse verifies that GetFeed handles empty response bodies correctly.
 func TestGetFeedEmptyResponse(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
 		w.WriteHeader(http.StatusOK)
 		// Don't write anything to the response body
 	}))
 	defer ts.Close()
 
 	client := rss.NewClient()
-	_, err := client.GetFeed(ts.URL)
+	_, err := client.GetFeed(context.Background(), ts.URL)
 	assert.Error(t, err)
 }
 
@@ -196,7 +200,7 @@ func TestGetFeedEmptyFeed(t *testing.T) {
 	defer ts.Close()
 
 	client := rss.NewClient()
-	feed, err := client.GetFeed(ts.URL)
+	feed, err := client.GetFeed(context.Background(), ts.URL)
 	assert.NoError(t, err)
 	assert.Equal(t, "2.0", feed.Version)
 	assert.Equal(t, "Empty Feed", feed.Channel.Title)
@@ -228,7 +232,7 @@ func TestGetFeedMissingOptionalFields(t *testing.T) {
 	defer ts.Close()
 
 	client := rss.NewClient()
-	feed, err := client.GetFeed(ts.URL)
+	feed, err := client.GetFeed(context.Background(), ts.URL)
 	assert.NoError(t, err)
 	assert.Equal(t, "2.0", feed.Version)
 	assert.Equal(t, "Minimal Feed", feed.Channel.Title)
@@ -269,6 +273,7 @@ func TestGetFeedExtendedFields(t *testing.T) {
       <guid>unique-id-123</guid>
       <author>john@example.com</author>
       <category>Technology</category>
+      <category>Science</category>
       <enclosure url="http://example.com/image.jpg" type="image/jpeg" length="12345"/>
     </item>
   </channel>
@@ -281,7 +286,7 @@ func TestGetFeedExtendedFields(t *testing.T) {
 	defer ts.Close()
 
 	client := rss.NewClient()
-	feed, err := client.GetFeed(ts.URL)
+	feed, err := client.GetFeed(context.Background(), ts.URL)
 	assert.NoError(t, err)
 
 	// Channel extended fields
@@ -296,20 +301,20 @@ func TestGetFeedExtendedFields(t *testing.T) {
 	assert.Equal(t, "Mon, 15 Jan 2024 10:30:00 GMT", item.PubDate)
 	assert.Equal(t, "unique-id-123", item.GUID)
 	assert.Equal(t, "john@example.com", item.Author)
-	assert.Equal(t, "Technology", item.Category)
+	assert.Equal(t, []string{"Technology", "Science"}, item.Category)
 	assert.NotNil(t, item.Enclosure)
 	assert.Equal(t, "http://example.com/image.jpg", item.Enclosure.URL)
 	assert.Equal(t, "image/jpeg", item.Enclosure.Type)
-	assert.Equal(t, "12345", item.Enclosure.Length)
+	assert.Equal(t, int64(12345), item.Enclosure.Length)
 }
 
 // TestParsePubDate verifies that ParsePubDate correctly parses various date formats.
 func TestParsePubDate(t *testing.T) {
 	testCases := []struct {
-		name     string
-		pubDate  string
-		expected time.Time
-		useNow   bool
+		name      string
+		pubDate   string
+		expected  time.Time
+		expectErr bool
 	}{
 		{
 			name:     "RFC1123",
@@ -337,26 +342,27 @@ func TestParsePubDate(t *testing.T) {
 			expected: time.Date(2024, 1, 15, 10, 30, 0, 0, time.FixedZone("", -5*3600)),
 		},
 		{
-			name:    "empty string",
-			pubDate: "",
-			useNow:  true,
+			name:      "empty string",
+			pubDate:   "",
+			expectErr: true,
 		},
 		{
-			name:    "invalid format",
-			pubDate: "not a date",
-			useNow:  true,
+			name:      "invalid format",
+			pubDate:   "not a date",
+			expectErr: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			item := rss.Item{PubDate: tc.pubDate}
-			result := item.ParsePubDate()
+			result, err := item.ParsePubDate()
 
-			if tc.useNow {
-				// Should be close to current time
-				assert.WithinDuration(t, time.Now(), result, 2*time.Second)
+			if tc.expectErr {
+				assert.Error(t, err)
+				assert.True(t, result.IsZero())
 			} else {
+				assert.NoError(t, err)
 				assert.Equal(t, tc.expected.Year(), result.Year())
 				assert.Equal(t, tc.expected.Month(), result.Month())
 				assert.Equal(t, tc.expected.Day(), result.Day())
@@ -416,5 +422,154 @@ func TestIsImageEnclosure(t *testing.T) {
 	t.Run("nil enclosure", func(t *testing.T) {
 		item := rss.Item{}
 		assert.False(t, item.IsImageEnclosure())
+	})
+}
+
+// TestGetFeedInvalidURL verifies that GetFeed returns an error for an invalid URL.
+func TestGetFeedInvalidURL(t *testing.T) {
+	client := rss.NewClient()
+	_, err := client.GetFeed(context.Background(), "://invalid")
+	assert.Error(t, err)
+}
+
+// TestGetFeedUnexpectedContentType verifies that GetFeed rejects non-XML content types.
+func TestGetFeedUnexpectedContentType(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html><body>Login page</body></html>"))
+	}))
+	defer ts.Close()
+
+	client := rss.NewClient()
+	_, err := client.GetFeed(context.Background(), ts.URL)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected content type")
+}
+
+// infiniteReader is an io.Reader that generates unlimited data.
+type infiniteReader struct{}
+
+func (ir *infiniteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+// oversizedRoundTripper returns a response body that exceeds maxResponseSize.
+type oversizedRoundTripper struct{}
+
+func (ort oversizedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(&infiniteReader{}),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// TestGetFeedOversizedResponse verifies that GetFeed rejects responses exceeding the size limit.
+func TestGetFeedOversizedResponse(t *testing.T) {
+	customHTTPClient := &http.Client{
+		Transport: oversizedRoundTripper{},
+		Timeout:   30 * time.Second,
+	}
+	client := rss.NewClient(rss.WithHTTPClient(customHTTPClient))
+	_, err := client.GetFeed(context.Background(), "http://example.com")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "response body exceeds maximum size")
+}
+
+// TestGetFeedAtomFeed verifies that GetFeed returns an error for Atom feeds.
+func TestGetFeedAtomFeed(t *testing.T) {
+	atomXML := `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom Feed</title>
+  <entry>
+    <title>Entry 1</title>
+  </entry>
+</feed>`
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(atomXML))
+	}))
+	defer ts.Close()
+
+	client := rss.NewClient()
+	_, err := client.GetFeed(context.Background(), ts.URL)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Atom feeds are not supported")
+}
+
+// TestWithTimeoutOrdering verifies that WithTimeout works regardless of ordering with WithHTTPClient.
+func TestWithTimeoutOrdering(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title></channel></rss>`))
+	}))
+	defer ts.Close()
+
+	// WithTimeout before WithHTTPClient — previously this timeout was silently discarded.
+	customHTTPClient := &http.Client{}
+	client := rss.NewClient(
+		rss.WithTimeout(50*time.Millisecond),
+		rss.WithHTTPClient(customHTTPClient),
+	)
+	_, err := client.GetFeed(context.Background(), ts.URL)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Client.Timeout")
+}
+
+// TestGetFeedContextCancellation verifies that GetFeed respects context cancellation.
+func TestGetFeedContextCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	client := rss.NewClient()
+	_, err := client.GetFeed(ctx, ts.URL)
+	assert.Error(t, err)
+}
+
+// TestGetFeedUserAgent verifies that GetFeed sets the User-Agent header.
+func TestGetFeedUserAgent(t *testing.T) {
+	feedXML := `<?xml version="1.0"?><rss version="2.0"><channel><title>Test</title></channel></rss>`
+
+	t.Run("default", func(t *testing.T) {
+		var receivedUA string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedUA = r.Header.Get("User-Agent")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(feedXML))
+		}))
+		defer ts.Close()
+
+		client := rss.NewClient()
+		_, err := client.GetFeed(context.Background(), ts.URL)
+		assert.NoError(t, err)
+		assert.Contains(t, receivedUA, "karoo")
+	})
+
+	t.Run("custom", func(t *testing.T) {
+		var receivedUA string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedUA = r.Header.Get("User-Agent")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(feedXML))
+		}))
+		defer ts.Close()
+
+		client := rss.NewClient(rss.WithUserAgent("my-app/2.0"))
+		_, err := client.GetFeed(context.Background(), ts.URL)
+		assert.NoError(t, err)
+		assert.Equal(t, "my-app/2.0", receivedUA)
 	})
 }
