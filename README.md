@@ -4,24 +4,26 @@
 
 # karoo
 
-A lightweight, efficient RSS feed client for Go that provides a simple interface for fetching and parsing RSS feeds with configurable HTTP client options.
+A lightweight RSS 2.0 feed client for Go. It fetches feeds over HTTP or parses them from any reader, using only the standard library.
 
 ## Features
 
-- Simple, clean API
-- Configurable HTTP client (timeouts, custom clients)
-- Context support for cancellation and deadline control
-- Response size limit to prevent OOM from oversized feeds
-- Content-Type validation and Atom feed detection
-- Comprehensive error handling
-- Zero external dependencies (uses only Go standard library)
-- Well-tested with 100% statement coverage
-- Thread-safe operations
+- Simple, clean API with functional options
+- Parse from HTTP (`GetFeed`, `Fetch`) or from any `io.Reader` / `[]byte` (`Parse`, `ParseBytes`)
+- Conditional requests with `ETag` and `Last-Modified` so unchanged feeds cost a single 304 round trip
+- Typed errors that work with `errors.Is` and `errors.As`
+- Context support for cancellation and deadlines
+- Streaming decode with a configurable response size limit
+- Built-in decoding of ISO-8859-1 and Windows-1252 feeds, pluggable for anything else
+- Tolerant of real-world feeds: junk `length` attributes, FeedBurner namespaces, `text/plain` content types, timezone abbreviations like `EST`
+- Extension elements: `content:encoded`, `dc:creator`, `dc:date`, `media:thumbnail`, `media:content`
+- Zero external dependencies, including in tests
+- Safe for concurrent use
 
 ## Installation
 
 ```bash
-go get -u github.com/junkd0g/karoo
+go get github.com/junkd0g/karoo
 ```
 
 ## Quick Start
@@ -46,303 +48,225 @@ func main() {
 	}
 
 	fmt.Printf("Feed Title: %s\n", feed.Channel.Title)
-	fmt.Printf("Feed Description: %s\n", feed.Channel.Description)
 	fmt.Printf("Number of items: %d\n", len(feed.Channel.Items))
 
 	for _, item := range feed.Channel.Items {
-		fmt.Printf("- %s: %s\n", item.Title, item.Link)
+		published, _ := item.ParsePubDate()
+		fmt.Printf("- %s (%s) by %s\n", item.Title, published.Format("2006-01-02"), item.GetAuthor())
 	}
+}
+```
+
+## Parsing Without HTTP
+
+`Parse` and `ParseBytes` decode a feed from memory or any reader, which is useful for cached files, test fixtures, or a custom fetch layer.
+
+```go
+data, _ := os.ReadFile("feed.xml")
+feed, err := rss.ParseBytes(data)
+```
+
+`Client.Parse` does the same but applies the client's charset reader and size limit.
+
+## Conditional Requests
+
+Pollers should use `Fetch`, which exposes the response validators and sends them back on the next request. When the server answers `304 Not Modified`, `Fetch` returns `ErrNotModified` and a `Result` with `NotModified` set.
+
+```go
+res, err := client.Fetch(ctx, url)
+if err != nil {
+	return err
+}
+etag, lastModified := res.ETag, res.LastModified
+
+// Later:
+res, err = client.Fetch(ctx, url, rss.WithETag(etag), rss.WithLastModified(lastModified))
+if errors.Is(err, rss.ErrNotModified) {
+	// Nothing changed. res.StatusCode == 304, res.Feed is empty.
 }
 ```
 
 ## Configuration Options
 
-### Custom Timeout
-
-```go
-client := rss.NewClient(rss.WithTimeout(30 * time.Second))
-```
-
-### Custom HTTP Client
-
-```go
-httpClient := &http.Client{
-	Timeout: 15 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		IdleConnTimeout:     30 * time.Second,
-		DisableCompression:  true,
-	},
-}
-
-client := rss.NewClient(rss.WithHTTPClient(httpClient))
-```
-
-### Custom User-Agent
-
-```go
-client := rss.NewClient(rss.WithUserAgent("my-app/2.0"))
-```
-
-### Multiple Configuration Options
-
-`WithTimeout` is always applied after all other options, so it works correctly regardless of ordering with `WithHTTPClient`:
-
 ```go
 client := rss.NewClient(
-	rss.WithHTTPClient(customHTTPClient),
-	rss.WithTimeout(20 * time.Second),
+	rss.WithTimeout(30*time.Second),          // default 10s
+	rss.WithHTTPClient(customHTTPClient),      // never mutated by karoo
+	rss.WithUserAgent("my-app/2.0"),           // default "karoo/<version> (+https://github.com/junkd0g/karoo)"
+	rss.WithMaxResponseSize(50*1024*1024),     // default 10 MB, 0 disables the limit
+	rss.WithCharsetReader(charset.NewReaderLabel), // e.g. golang.org/x/net/html/charset for every encoding
 )
+```
+
+`WithTimeout` is applied after all other options, so it works regardless of ordering with `WithHTTPClient`, and it copies the HTTP client rather than modifying yours.
+
+### Character Encodings
+
+Feeds that declare UTF-8, US-ASCII, ISO-8859-1, or Windows-1252 are decoded out of the box. For other encodings, supply a `CharsetReader`. The one from `golang.org/x/net/html/charset` covers everything:
+
+```go
+import "golang.org/x/net/html/charset"
+
+client := rss.NewClient(rss.WithCharsetReader(charset.NewReaderLabel))
 ```
 
 ## Error Handling
 
+All errors wrap a sentinel, so use `errors.Is` and `errors.As` rather than string matching. The message text from earlier versions is preserved for callers that still match on it.
+
 ```go
-feed, err := client.GetFeed(context.Background(), "https://example.com/feed.xml")
+feed, err := client.GetFeed(ctx, url)
 if err != nil {
+	var statusErr *rss.HTTPStatusError
 	switch {
-	case strings.Contains(err.Error(), "failed to fetch RSS feed"):
-		// Handle HTTP errors (404, 500, etc.)
-		log.Printf("HTTP error: %v", err)
-	case strings.Contains(err.Error(), "unexpected content type"):
-		// Handle non-XML responses (e.g., HTML login pages)
-		log.Printf("Content type error: %v", err)
-	case strings.Contains(err.Error(), "Atom feeds are not supported"):
-		// Handle Atom feeds
-		log.Printf("Unsupported format: %v", err)
-	case strings.Contains(err.Error(), "Client.Timeout"):
-		// Handle timeout errors
-		log.Printf("Request timeout: %v", err)
+	case errors.As(err, &statusErr):
+		log.Printf("HTTP %d: %s", statusErr.StatusCode, statusErr.Status)
+	case errors.Is(err, rss.ErrUnexpectedContentType):
+		log.Print("server returned an HTML page, not a feed")
+	case errors.Is(err, rss.ErrUnsupportedFormat):
+		log.Print("Atom or RSS 1.0 feed; only RSS 2.0 is supported")
+	case errors.Is(err, rss.ErrResponseTooLarge):
+		log.Print("feed exceeds the size limit")
+	case errors.Is(err, rss.ErrParseFeed):
+		log.Printf("malformed XML: %v", err)
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Print("timed out")
 	default:
-		// Handle other errors (network, XML parsing, etc.)
-		log.Printf("Error fetching feed: %v", err)
+		log.Printf("network error: %v", err)
 	}
 	return
 }
 ```
 
+| Error | Meaning |
+|---|---|
+| `*HTTPStatusError` (matches `ErrHTTPStatus`) | Status other than 200 or 304. Carries `StatusCode` and `Status`. |
+| `ErrNotModified` | Server answered 304 to a conditional `Fetch`. |
+| `ErrUnexpectedContentType` | Response was `text/html`, almost always a login or error page. |
+| `ErrResponseTooLarge` | Body exceeded `WithMaxResponseSize`. |
+| `ErrUnsupportedFormat` | Well-formed XML that is Atom, RSS 1.0 (RDF), or not a feed. |
+| `ErrParseFeed` | XML decoding failed, including unsupported charsets. |
+| `ErrParsePubDate` | A date helper got an empty or unrecognised value. |
+
 ## API Reference
 
 ### Types
 
-#### RSS
 ```go
 type RSS struct {
-	XMLName xml.Name `xml:"rss"`
-	Version string   `xml:"version,attr"`
-	Channel Channel  `xml:"channel"`
+	XMLName xml.Name
+	Version string
+	Channel Channel
 }
-```
 
-#### Channel
-```go
 type Channel struct {
-	Title       string `xml:"title"`
-	Link        string `xml:"link"`
-	Description string `xml:"description"`
-	Language    string `xml:"language"`
-	Image       *Image `xml:"image"`
-	Items       []Item `xml:"item"`
+	Title, Link, Description, Language string
+	Copyright, ManagingEditor, WebMaster string
+	PubDate, LastBuildDate               string
+	Generator, Docs                      string
+	TTL                                  int      // minutes; 0 when absent or unparseable
+	Category                             []string
+	Image                                *Image
+	Items                                []Item
 }
-```
 
-#### Image
-```go
 type Image struct {
-	URL   string `xml:"url"`
-	Title string `xml:"title"`
-	Link  string `xml:"link"`
+	URL, Title, Link string
 }
-```
 
-#### Item
-```go
 type Item struct {
-	Title       string     `xml:"title"`
-	Link        string     `xml:"link"`
-	Description string     `xml:"description"`
-	PubDate     string     `xml:"pubDate"`
-	GUID        string     `xml:"guid"`
-	Author      string     `xml:"author"`
-	Category    []string   `xml:"category"`
-	Enclosure   *Enclosure `xml:"enclosure"`
+	Title, Link, Description, PubDate string
+	GUID                              string
+	GUIDIsPermaLink                   bool   // true when <guid> is present without isPermaLink="false"
+	Author                            string // <author>, by spec an email address
+	Creator                           string // <dc:creator>, usually a display name
+	Date                              string // <dc:date>
+	Content                           string // <content:encoded>, full HTML body
+	Category                          []string
+	Comments                          string
+	Enclosure                         *Enclosure
+	Source                            *Source
+	MediaThumbnails                   []MediaContent // <media:thumbnail>
+	MediaContents                     []MediaContent // <media:content>
 }
-```
 
-#### Enclosure
-```go
 type Enclosure struct {
-	URL    string `xml:"url,attr"`
-	Type   string `xml:"type,attr"`
-	Length int64  `xml:"length,attr"`
+	URL, Type string
+	Length    int64 // 0 when absent or unparseable
 }
-```
 
-#### Client
-```go
-type Client struct {
-	// contains filtered or unexported fields
+type Source struct {
+	URL, Name string
+}
+
+type MediaContent struct {
+	URL, Type, Medium string
+	Width, Height     int // 0 when absent or unparseable
+}
+
+type Result struct {
+	Feed         RSS
+	StatusCode   int
+	ETag         string
+	LastModified string
+	NotModified  bool
 }
 ```
 
 ### Functions
 
-#### NewClient
-```go
-func NewClient(opts ...ClientOption) *Client
-```
-Creates a new RSS client with optional configuration. Default timeout is 10 seconds.
+| Function | Description |
+|---|---|
+| `NewClient(opts ...ClientOption) *Client` | Creates a client. Defaults: 10s timeout, 10 MB limit, `DefaultCharsetReader`. |
+| `Parse(r io.Reader) (RSS, error)` | Decodes a feed from a reader with no size limit. |
+| `ParseBytes(data []byte) (RSS, error)` | Decodes a feed held in memory. |
+| `ParseDate(value string) (time.Time, error)` | Parses RFC 822, RFC 1123, RFC 3339 and common loose variants. Resolves timezone abbreviations. |
+| `DefaultCharsetReader(charset string, r io.Reader) (io.Reader, error)` | Handles UTF-8, US-ASCII, ISO-8859-1, Windows-1252. |
 
-#### WithTimeout
-```go
-func WithTimeout(timeout time.Duration) ClientOption
-```
-Sets a custom timeout for HTTP requests. Applied after all other options, so it works correctly regardless of ordering with `WithHTTPClient`.
+### Client Options
 
-#### WithHTTPClient
-```go
-func WithHTTPClient(httpClient *http.Client) ClientOption
-```
-Sets a custom HTTP client for RSS requests.
+| Option | Description |
+|---|---|
+| `WithTimeout(d)` | HTTP timeout. Applied last, never mutates a supplied client. |
+| `WithHTTPClient(c)` | Custom `*http.Client`. `nil` keeps the default. |
+| `WithUserAgent(s)` | Custom `User-Agent` header. |
+| `WithMaxResponseSize(n)` | Response body cap in bytes. `0` or less disables it. |
+| `WithCharsetReader(f)` | Decoder for non-UTF-8 feeds. `nil` restores the default. |
 
-#### WithUserAgent
-```go
-func WithUserAgent(userAgent string) ClientOption
-```
-Sets a custom User-Agent header for HTTP requests. Defaults to `karoo/1.0`.
+### Client Methods
 
-### Methods
+| Method | Description |
+|---|---|
+| `GetFeed(ctx, url) (RSS, error)` | Fetches and parses a feed. |
+| `Fetch(ctx, url, opts ...FetchOption) (*Result, error)` | Like `GetFeed` but returns validators and supports `WithETag` / `WithLastModified`. |
+| `Parse(r io.Reader) (RSS, error)` | Decodes with the client's charset reader and size limit. |
 
-#### GetFeed
-```go
-func (c *Client) GetFeed(ctx context.Context, url string) (RSS, error)
-```
-Fetches and parses an RSS feed from the specified URL. Accepts a context for cancellation and deadline control. Returns the parsed RSS struct or an error. Sets a `User-Agent` header on requests. Validates the response Content-Type is XML-based, limits response body size to 10MB, and detects Atom feeds (returning an error since only RSS is supported).
+### Item and Channel Methods
 
-#### ParsePubDate
-```go
-func (item *Item) ParsePubDate() (time.Time, error)
-```
-Attempts to parse the PubDate field into a `time.Time`. Returns the parsed time and nil on success, or a zero `time.Time` and an error if the date is empty or in an unrecognized format. Supports RFC1123, RFC1123Z, RFC822, RFC822Z, ISO 8601, and other common date formats.
+| Method | Description |
+|---|---|
+| `Item.ParsePubDate()` | Parses `<pubDate>`, falling back to `<dc:date>`. |
+| `Item.GetAuthor()` | `<dc:creator>` if set, otherwise `<author>`. |
+| `Item.GetContent()` | `<content:encoded>` if set, otherwise `<description>`. |
+| `Item.GetEnclosureURL()` | Enclosure URL or empty string. |
+| `Item.IsImageEnclosure()` / `IsAudioEnclosure()` / `IsVideoEnclosure()` | MIME type prefix checks, case-insensitive, parameters ignored. |
+| `Enclosure.IsImage()` / `IsAudio()` / `IsVideo()` | Same checks on the enclosure itself. |
+| `Channel.ParsePubDate()` / `ParseLastBuildDate()` | Channel-level date parsing. |
 
-#### GetEnclosureURL
-```go
-func (item *Item) GetEnclosureURL() string
-```
-Returns the enclosure URL if present, empty string otherwise.
+## Limitations
 
-#### IsImageEnclosure
-```go
-func (item *Item) IsImageEnclosure() bool
-```
-Returns true if the enclosure MIME type is an image (jpeg, png, gif, or webp).
-
-## Examples
-
-### Basic Usage with Error Handling
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-
-	rss "github.com/junkd0g/karoo"
-)
-
-func main() {
-	client := rss.NewClient()
-
-	feeds := []string{
-		"https://rss.cnn.com/rss/edition.rss",
-		"https://feeds.bbci.co.uk/news/rss.xml",
-		"https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-	}
-
-	for _, feedURL := range feeds {
-		feed, err := client.GetFeed(context.Background(), feedURL)
-		if err != nil {
-			log.Printf("Error fetching %s: %v", feedURL, err)
-			continue
-		}
-
-		fmt.Printf("\n=== %s ===\n", feed.Channel.Title)
-		for i, item := range feed.Channel.Items {
-			if i >= 3 { // Show only first 3 items
-				break
-			}
-			fmt.Printf("%d. %s\n", i+1, item.Title)
-		}
-	}
-}
-```
-
-### Concurrent Feed Fetching
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-	"sync"
-	"time"
-
-	rss "github.com/junkd0g/karoo"
-)
-
-func main() {
-	client := rss.NewClient(rss.WithTimeout(5 * time.Second))
-
-	feeds := []string{
-		"https://rss.cnn.com/rss/edition.rss",
-		"https://feeds.bbci.co.uk/news/rss.xml",
-		"https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-	}
-
-	var wg sync.WaitGroup
-	results := make(chan string, len(feeds))
-
-	ctx := context.Background()
-	for _, feedURL := range feeds {
-		wg.Add(1)
-		go func(url string) {
-			defer wg.Done()
-
-			feed, err := client.GetFeed(ctx, url)
-			if err != nil {
-				results <- fmt.Sprintf("Error fetching %s: %v", url, err)
-				return
-			}
-
-			results <- fmt.Sprintf("%s: %d items", feed.Channel.Title, len(feed.Channel.Items))
-		}(feedURL)
-	}
-
-	wg.Wait()
-	close(results)
-
-	for result := range results {
-		fmt.Println(result)
-	}
-}
-```
+Only RSS 2.0 (and the compatible 0.9x family) is parsed. Atom and RSS 1.0 (RDF) documents are detected and rejected with `ErrUnsupportedFormat`.
 
 ## Testing
 
-Run the test suite:
-
 ```bash
-go test -v
+go test -race -cover ./...
 ```
 
-Run tests with coverage:
+Fuzz targets are included:
 
 ```bash
-go test -v -cover
+go test -run='^$' -fuzz=FuzzParseBytes -fuzztime=30s ./...
 ```
 
 ## Contributing
@@ -352,6 +276,8 @@ go test -v -cover
 3. Commit your changes (`git commit -m 'Add some amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+CI runs formatting, vet, race tests, fuzz smoke tests, golangci-lint, govulncheck, and an API compatibility check against the last release.
 
 ## License
 

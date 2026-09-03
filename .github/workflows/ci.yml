@@ -6,12 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.24', '1.25']
+        go-version: ['oldstable', 'stable']
 
     steps:
       - uses: actions/checkout@v4
@@ -30,11 +33,21 @@ jobs:
             exit 1
           fi
 
+      - name: Check go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
       - name: Vet
         run: go vet ./...
 
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Fuzz smoke test
+        run: |
+          go test -run=^$ -fuzz=FuzzParseBytes -fuzztime=20s ./...
+          go test -run=^$ -fuzz=FuzzParseDate -fuzztime=10s ./...
 
       - name: Print coverage
         run: go tool cover -func=coverage.out
@@ -70,3 +83,20 @@ jobs:
         with:
           go-version-input: stable
           go-package: ./...
+
+  api-compat:
+    # Flags any change that is incompatible with the latest tagged release.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: gorelease
+        run: go run golang.org/x/exp/cmd/gorelease@latest
